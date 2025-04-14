@@ -1,11 +1,13 @@
 package oidc
 
 import (
+	"context"
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/hidevopsio/hiboot/pkg/app"
-	"github.com/hidevopsio/hiboot/pkg/app/web/context"
+	hcontext "github.com/hidevopsio/hiboot/pkg/app/web/context"
 	"github.com/hidevopsio/hiboot/pkg/at"
 	"github.com/hidevopsio/hiboot/pkg/log"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -17,27 +19,29 @@ const (
 
 type configuration struct {
 	at.AutoConfiguration
+
+	prop *Properties
 }
 
-func newConfiguration() *configuration {
-	return &configuration{}
+func newConfiguration(prop *Properties) *configuration {
+	return &configuration{prop: prop}
 }
 
 func init() {
-	app.Register(newConfiguration)
+	app.Register(newConfiguration, new(Properties))
 }
 
 // Token
 type Token struct {
 	at.ContextAware
 
-	Context context.Context `json:"context"`
-	Data    string          `json:"data"`
-	Claims  *Claims         `json:"claims"`
+	Context hcontext.Context `json:"context"`
+	Data    string           `json:"data"`
+	Claims  *Claims          `json:"claims"`
 }
 
 // Token instantiate bearer token to object
-func (c *configuration) Token(ctx context.Context) (token *Token, err error) {
+func (c *configuration) Token(ctx hcontext.Context) (token *Token, err error) {
 	token = new(Token)
 	if ctx == nil {
 		err = errors.NewBadRequest("unknown context")
@@ -49,12 +53,31 @@ func (c *configuration) Token(ctx context.Context) (token *Token, err error) {
 		bearerToken = ctx.URLParam("token")
 	}
 	token.Data = strings.Replace(bearerToken, "Bearer ", "", -1)
+
+	if c.prop.Verify {
+		provider, err := oidc.NewProvider(context.TODO(), c.prop.Issuer)
+		if err != nil {
+			log.Errorf("create oidc provider failed,err: %v", err)
+			return nil, err
+		}
+
+		verifier := provider.Verifier(&oidc.Config{
+			ClientID: c.prop.ClientID,
+		})
+
+		_, err = verifier.Verify(context.TODO(), token.Data)
+		if err != nil {
+			err = errors.NewUnauthorized(err.Error())
+			return nil, err
+		}
+	}
+
 	token.Claims, err = DecodeWithoutVerify(token.Data)
 	if err != nil {
 		pe := err
 		err = errors.NewUnauthorized("Unauthorized")
 		log.Errorf("%v -> %v", pe, err)
-		return  // fixes the nil pointer issue
+		return // fixes the nil pointer issue
 	}
 	if token.Claims.Expiry.Before(time.Now()) {
 		err = errors.NewUnauthorized("Expired")
